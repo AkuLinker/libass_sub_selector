@@ -1,7 +1,7 @@
 # libass_sub_selector
 Visually select individual subtitles a la PotPlayer.
-[OldPreviewBeforeFork](https://too.lewd.se/bb9fafdc5a88_preview.mp4)
-[FastMadePreview](https://github.com/AkuLinker/libass_sub_selector/raw/master/preview.mp4)
+- [OldPreviewBeforeFork](https://github.com/po5/libass_sub_selector/raw/master/preview.mp4)
+- [FastMadePreview](https://github.com/AkuLinker/libass_sub_selector/raw/master/preview.mp4)
 
 This is a Linux/Wayland fork of [po5/libass_sub_selector](https://github.com/po5/libass_sub_selector), reworked with the help of AI. Windows support has been dropped, clipboard integration changed to `wl-copy`.
 
