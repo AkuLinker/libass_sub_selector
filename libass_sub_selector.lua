@@ -1,3 +1,9 @@
+-- libass_sub_selector.lua (Linux/Wayland)
+-- Requires wl-clipboard installed for copy functionality.
+-- Add these two bindings to your input.conf:
+--   <key> script-binding copy-subs
+--   <key> script-binding toggle-bounds
+
 local libass_names = {"libass", "libass-4", "libass-5", "libass-9", "ass"}
 local libass_path = nil
 local ffi = require "ffi"
@@ -31,14 +37,12 @@ char *strcpy(char *, const char *);
 size_t strlen(const char *s);
 ]]
 
-utils = require "mp.utils"
 
 local utils = require "mp.utils"
 local assdraw = require "mp.assdraw"
 local ffmpeg = nil
-local scripts_dir = mp.command_native({"expand-path", "~~home/scripts"})
-
-local ON_WINDOWS = (package.config:sub(1,1) ~= '/')
+local mp = require 'mp'
+local mpv_cache = mp.command_native({"expand-path", "~~home/cache"})
 
 function file_exists(name)
     local f = io.open(name, "rb")
@@ -52,22 +56,17 @@ function file_exists(name)
 end
 
 function find_executable(name)
-    local delim = ON_WINDOWS and ";" or ":"
-
     local pwd = os.getenv("PWD") or utils.getcwd()
     local path = os.getenv("PATH")
-
-    local env_path = pwd .. delim .. path
-
+    local env_path = pwd .. ":" .. path
     local result, filename
-    for path_dir in env_path:gmatch("[^"..delim.."]+") do
+    for path_dir in env_path:gmatch("[^:]+") do
         filename = utils.join_path(path_dir, name)
         if file_exists(filename) then
             result = filename
             break
         end
     end
-
     return result
 end
 
@@ -76,8 +75,8 @@ local options = {
     on_hover = true,
     autohide = true,
     libass_path = "",
-    fonts_dir = utils.join_path(scripts_dir, "shared/fonts"),
-    tmp_ass = utils.join_path(scripts_dir, "shared/subs.ass")
+    fonts_dir = utils.join_path(mpv_cache, "sub_selector/fonts"),
+    tmp_ass = utils.join_path(mpv_cache, "sub_selector/subs.ass")
 }
 
 mp.options = require "mp.options"
@@ -85,7 +84,6 @@ mp.options.read_options(options, "libass_sub_selector")
 
 if options.libass_path == "" then
     for _, libass_name in ipairs(libass_names) do
-        libass_name = ON_WINDOWS and (libass_name .. ".dll") or libass_name
         libass_path = find_executable(libass_name)
         if libass_path then break end
     end
@@ -221,16 +219,14 @@ function events_at(time)
 end
 
 function copy_subs(text)
-    local res = mp.commandv("run", "powershell", "-NoProfile", "-Command", string.format([[& {
-      Trap {
-        Write-Error -ErrorRecord $_
-        Exit 1
-      }
-      Add-Type -AssemblyName PresentationCore
-      [System.Windows.Clipboard]::SetText(@"
-%s
-"@)
-    }]], text))
+    local pipe = io.popen("wl-copy", "w")
+    if pipe then
+        pipe:write(text)
+        pipe:close()
+        mp.osd_message("Subtitle copied to clipboard")
+    else
+        mp.msg.error("copy_subs: failed to open wl-copy")
+    end
 end
 
 function compare_subs(a, b)
@@ -243,8 +239,9 @@ function compare_subs(a, b)
 end
 
 function tick(copy)
-    if copy == true and events == nil then copy_subs(mp.get_property_native("sub-text")) end
+    if copy == true and events == nil then return end
     if events == nil then return end
+    if not mp.get_property_native("sub-visibility") then return mp.set_osd_ass(0, 0, "") end
     if options.paused_only and not mp.get_property_native("core-idle") then return mp.set_osd_ass(width, height, "") end
     local pos = mp.get_property_native("time-pos")
     if not pos then return end
@@ -314,7 +311,7 @@ function tick(copy)
             if not show_all then break end
         end
     end
-    if copy == true then
+    if copy == true and #to_copy > 0 then
         copy_subs(table.concat(to_copy, "\n"))
     end
     mp.set_osd_ass(width, height, ass.text)
@@ -380,11 +377,15 @@ function file_loaded()
             file
         }}
         local json = utils.parse_json(tracks.stdout)
-        local args = {"mkvextract", "attachments", file}
-        for key, value in pairs(json.attachments) do
-            table.insert(args, value.id .. ":" .. options.fonts_dir .. "/" .. value.file_name)
+        if json and json.attachments and #json.attachments > 0 then
+            local args = {"mkvextract", "attachments", file}
+            for key, value in pairs(json.attachments) do
+                table.insert(args, value.id .. ":" .. options.fonts_dir .. "/" .. value.file_name)
+            end
+            mp.command_native_async({name = "subprocess", playback_only = false, args = args}, init_track)
+        else
+            init_track()
         end
-        mp.command_native_async({name = "subprocess", playback_only = false, args = args}, init_track)
         mp.register_event("track-switched", init_track)
     else
         init_track()
@@ -396,8 +397,30 @@ function toggle_bounds()
     show_all = not show_all
 end
 
-mp.register_event("file-loaded", file_loaded)
-mp.register_event("tick", tick)
+-- Replace deprecated "tick" event with a periodic timer (runs every ~16ms ≈ 60fps).
+local tick_timer = mp.add_periodic_timer(0.016, tick)
+tick_timer:stop()
 
-mp.add_key_binding("c", "copy-subs", function() return tick(true) end)
-mp.add_key_binding("b", "toggle-bounds", toggle_bounds)
+mp.register_event("file-loaded", function()
+    file_loaded()
+    tick_timer:resume()
+end)
+
+mp.register_event("end-file", function()
+    tick_timer:stop()
+    clear_subs()
+end)
+
+mp.observe_property("pause", "bool", function(_, paused)
+    if paused then
+        tick_timer:resume()
+    else
+        if options.paused_only then
+            tick_timer:stop()
+            if width and height then mp.set_osd_ass(width, height, "") end
+        end
+    end
+end)
+
+mp.add_key_binding(nil, "copy-subs", function() return tick(true) end)
+mp.add_key_binding(nil, "toggle-bounds", toggle_bounds)
